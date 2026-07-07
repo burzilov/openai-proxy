@@ -1,0 +1,48 @@
+services:
+  openai-proxy:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: openai-proxy:local
+    expose:
+      - "8080"
+    env_file:
+      - .env
+    volumes:
+      - codex-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - codex-net
+
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:main-stable
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./docs/examples/litellm_config.yaml:/app/config.yaml:ro
+    env_file:
+      - .env
+    environment:
+      PROXY_API_KEY: ${PROXY_API_KEY}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      openai-proxy:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - codex-net
+
+volumes:
+  codex-data:
+    driver: local
+
+networks:
+  codex-net:
+    driver: bridge

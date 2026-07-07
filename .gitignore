@@ -1,0 +1,7 @@
+/openai-proxy
+*.exe
+.env
+/data/
+auth.json
+*.test
+auth.json
