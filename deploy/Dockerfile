@@ -15,7 +15,8 @@ COPY LICENSE /app/LICENSE
 COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 LABEL org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.description="Unofficial OpenAI-compatible proxy for ChatGPT Codex (not affiliated with OpenAI)"
+      org.opencontainers.image.description="Unofficial OpenAI-compatible proxy for ChatGPT Codex (not affiliated with OpenAI)" \
+      org.opencontainers.image.source="https://github.com/burzilov/openai-proxy"
 VOLUME ["/data"]
 EXPOSE 8080
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

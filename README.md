@@ -36,6 +36,20 @@ curl http://localhost:4000/v1/chat/completions \
   -d '{"model":"codex-gpt-5.4","messages":[{"role":"user","content":"ping"}]}'
 ```
 
+### Docker Hub image
+
+Pre-built image (after publish):
+
+```bash
+docker pull burzilov/openai-proxy:latest
+```
+
+In `docker-compose.yml`, replace `build:` with:
+
+```yaml
+image: burzilov/openai-proxy:latest
+```
+
 ## CLI
 
 ```bash
