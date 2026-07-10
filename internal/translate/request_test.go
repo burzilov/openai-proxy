@@ -527,32 +527,56 @@ func TestExtractOutput_StringifiedContentBlocks(t *testing.T) {
 	}
 }
 
-func TestStreamHoldsAndFlattensContentBlocks(t *testing.T) {
+func TestStreamBuffersTextUntilFlush(t *testing.T) {
 	state := translate.NewStreamState("gpt-5.4")
 	payload := `[{"type":"text","text":"Switch Partner"}]`
-	var mid []openai.ChatCompletionChunk
 	for _, r := range payload {
-		ch := state.ChunksFromTextDelta(string(r))
-		mid = append(mid, ch...)
-	}
-	var sawText bool
-	for _, ch := range mid {
-		for _, c := range ch.Choices {
-			if c.Delta != nil && len(c.Delta.Content) > 0 && string(c.Delta.Content) != `""` {
-				// role chunk has no content; content should appear only after full JSON
-				if openai.MessageContentString(c.Delta.Content) == "Switch Partner" {
-					sawText = true
-				}
-				if strings.Contains(openai.MessageContentString(c.Delta.Content), `[{"type"`) {
-					t.Fatalf("streamed raw content blocks: %s", c.Delta.Content)
+		for _, ch := range state.ChunksFromTextDelta(string(r)) {
+			for _, c := range ch.Choices {
+				if c.Delta != nil && openai.MessageContentString(c.Delta.Content) != "" {
+					t.Fatalf("content should not stream before flush, got %q", c.Delta.Content)
 				}
 			}
 		}
 	}
-	if !sawText {
-		t.Fatal("expected flattened text after complete JSON")
-	}
-	if state.TextBuffer != "Switch Partner" {
+	if state.TextBuffer != payload {
 		t.Fatalf("buffer=%q", state.TextBuffer)
+	}
+	chunks := state.FlushText("")
+	if len(chunks) == 0 {
+		t.Fatal("expected flush chunks")
+	}
+	var got string
+	for _, ch := range chunks {
+		for _, c := range ch.Choices {
+			if c.Delta != nil {
+				got += openai.MessageContentString(c.Delta.Content)
+			}
+		}
+	}
+	if got != "Switch Partner" {
+		t.Fatalf("flushed %q", got)
+	}
+	if state.FlushText("") != nil {
+		t.Fatal("second flush should be a no-op")
+	}
+}
+
+func TestStreamFlushPlainBracketProse(t *testing.T) {
+	state := translate.NewStreamState("gpt-5.4")
+	for _, r := range `[note] hello` {
+		_ = state.ChunksFromTextDelta(string(r))
+	}
+	chunks := state.FlushText("")
+	var got string
+	for _, ch := range chunks {
+		for _, c := range ch.Choices {
+			if c.Delta != nil {
+				got += openai.MessageContentString(c.Delta.Content)
+			}
+		}
+	}
+	if got != `[note] hello` {
+		t.Fatalf("got %q", got)
 	}
 }

@@ -152,6 +152,13 @@ func (h *ChatCompletions) stream(w http.ResponseWriter, r *http.Request, model s
 		slog.Debug("agentic stream", "session", sessionID, "continuations", continuations)
 	}
 
+	for _, chunk := range state.FlushText("") {
+		if err := writeSSE(w, chunk); err != nil {
+			return
+		}
+		flusher.Flush()
+	}
+
 	final := state.FinalChunk()
 	_ = writeSSE(w, final)
 	flusher.Flush()
