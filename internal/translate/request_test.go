@@ -2,6 +2,7 @@ package translate_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"openai-proxy/internal/openai"
@@ -234,6 +235,116 @@ func TestExtractOutput_CustomToolCall(t *testing.T) {
 	}
 	if !toolCalls[0].IsCustom() || toolCalls[0].Custom.Name != "ApplyPatch" {
 		t.Fatalf("tool call=%+v", toolCalls[0])
+	}
+}
+
+func TestStreamCustomToolCallDoneWithoutDeltas(t *testing.T) {
+	// Reproduces Cursor/Codex path: custom_tool_call arrives only in
+	// output_item.done / response.completed, with finish_reason tool_calls
+	// but previously no tool_calls payload in the Chat Completions stream.
+	state := translate.NewStreamState("gpt-5.4")
+
+	done := json.RawMessage(`{
+		"output_index": 0,
+		"item": {
+			"type": "custom_tool_call",
+			"call_id": "call_patch",
+			"name": "ApplyPatch",
+			"input": "*** Begin Patch\n*** Add File: /tmp/x.txt\n+hello\n*** End Patch\n"
+		}
+	}`)
+	chunks := translate.ApplyResponseEvent(state, "response.output_item.done", done)
+	if len(chunks) < 2 {
+		t.Fatalf("expected role+tool chunks from done, got %d", len(chunks))
+	}
+	var sawCustom bool
+	for _, ch := range chunks {
+		for _, c := range ch.Choices {
+			if c.Delta == nil {
+				continue
+			}
+			for _, tc := range c.Delta.ToolCalls {
+				if tc.Type == "custom" && tc.Custom != nil && tc.Custom.Name == "ApplyPatch" {
+					sawCustom = true
+				}
+				if tc.Custom != nil && strings.Contains(tc.Custom.Input, "Begin Patch") {
+					sawCustom = true
+				}
+			}
+		}
+	}
+	if !sawCustom {
+		t.Fatal("expected custom ApplyPatch tool call chunks")
+	}
+
+	completed := json.RawMessage(`{
+		"response": {
+			"status": "completed",
+			"output": [{
+				"type": "custom_tool_call",
+				"call_id": "call_patch",
+				"name": "ApplyPatch",
+				"input": "*** Begin Patch\n*** Add File: /tmp/x.txt\n+hello\n*** End Patch\n"
+			}]
+		}
+	}`)
+	// Second pass must not duplicate payload.
+	more := translate.ApplyResponseEvent(state, "response.completed", completed)
+	for _, ch := range more {
+		for _, c := range ch.Choices {
+			if c.Delta == nil {
+				continue
+			}
+			for _, tc := range c.Delta.ToolCalls {
+				if tc.Custom != nil && tc.Custom.Input != "" {
+					t.Fatalf("unexpected duplicate input on completed: %q", tc.Custom.Input)
+				}
+			}
+		}
+	}
+	if state.FinishReason != "tool_calls" {
+		t.Fatalf("finish=%s", state.FinishReason)
+	}
+}
+
+func TestStreamCustomToolCallCompletedOnly(t *testing.T) {
+	state := translate.NewStreamState("gpt-5.4")
+	completed := json.RawMessage(`{
+		"response": {
+			"status": "completed",
+			"output": [{
+				"type": "custom_tool_call",
+				"call_id": "call_patch",
+				"name": "ApplyPatch",
+				"input": "*** Begin Patch\n*** End Patch\n"
+			}]
+		}
+	}`)
+	chunks := translate.ApplyResponseEvent(state, "response.completed", completed)
+	if len(chunks) < 2 {
+		t.Fatalf("expected tool call chunks, got %d", len(chunks))
+	}
+	var name, input string
+	for _, ch := range chunks {
+		for _, c := range ch.Choices {
+			if c.Delta == nil {
+				continue
+			}
+			for _, tc := range c.Delta.ToolCalls {
+				if tc.Custom != nil && tc.Custom.Name != "" {
+					name = tc.Custom.Name
+				}
+				if tc.Custom != nil && tc.Custom.Input != "" {
+					input += tc.Custom.Input
+				}
+			}
+		}
+	}
+	if name != "ApplyPatch" || !strings.Contains(input, "Begin Patch") {
+		t.Fatalf("name=%q input=%q", name, input)
+	}
+	if state.FinishReason != "tool_calls" {
+		t.Fatalf("finish=%s", state.FinishReason)
 	}
 }
 

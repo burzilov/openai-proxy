@@ -240,7 +240,8 @@ func (s *StreamState) handleCustomToolCallInputDelta(data json.RawMessage) []ope
 
 func (s *StreamState) handleOutputItemDone(data json.RawMessage) []openai.ChatCompletionChunk {
 	var payload struct {
-		Item map[string]any `json:"item"`
+		OutputIndex int            `json:"output_index"`
+		Item        map[string]any `json:"item"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil || payload.Item == nil {
 		return nil
@@ -255,7 +256,18 @@ func (s *StreamState) handleOutputItemDone(data json.RawMessage) []openai.ChatCo
 	if s.FinishReason == "stop" {
 		s.FinishReason = "tool_calls"
 	}
-	return nil
+
+	// Codex often delivers custom_tool_call only in output_item.done
+	// (no added/delta events). Backfill Chat Completions tool_calls then.
+	tc := toolCallFromOutputItem(payload.Item)
+	if tc == nil {
+		return nil
+	}
+	idx := payload.OutputIndex
+	if found, ok := s.indexForCallID(tc.ID); ok {
+		idx = found
+	}
+	return s.emitOrBackfillToolCall(*tc, idx)
 }
 
 func (s *StreamState) collectOutputItem(item map[string]any) {
@@ -317,8 +329,10 @@ func (s *StreamState) handleTerminal(data json.RawMessage) []openai.ChatCompleti
 			}))
 			s.TextBuffer = content
 		}
-		if !s.HasToolCalls && len(toolCalls) > 0 {
-			chunks = append(chunks, s.emitToolCallsFromComplete(toolCalls)...)
+		if len(toolCalls) > 0 {
+			for i, tc := range toolCalls {
+				chunks = append(chunks, s.emitOrBackfillToolCall(tc, i)...)
+			}
 			s.HasToolCalls = true
 			s.FinishReason = "tool_calls"
 		}
@@ -329,27 +343,110 @@ func (s *StreamState) handleTerminal(data json.RawMessage) []openai.ChatCompleti
 	return nil
 }
 
-func (s *StreamState) emitToolCallsFromComplete(toolCalls []openai.ToolCall) []openai.ChatCompletionChunk {
+func toolCallFromOutputItem(item map[string]any) *openai.ToolCall {
+	if item == nil {
+		return nil
+	}
+	itemType, _ := item["type"].(string)
+	callID, _ := item["call_id"].(string)
+	name, _ := item["name"].(string)
+	switch itemType {
+	case "function_call":
+		args, _ := item["arguments"].(string)
+		if callID == "" {
+			callID = deterministicCallID(name, args, 0)
+		}
+		return &openai.ToolCall{
+			ID:   callID,
+			Type: "function",
+			Function: &openai.ToolCallFunction{
+				Name:      name,
+				Arguments: normalizeArguments(args),
+			},
+		}
+	case "custom_tool_call":
+		input, _ := item["input"].(string)
+		if callID == "" {
+			callID = deterministicCallID(name, input, 0)
+		}
+		return &openai.ToolCall{
+			ID:   callID,
+			Type: "custom",
+			Custom: &openai.ToolCallCustom{
+				Name:  name,
+				Input: input,
+			},
+		}
+	default:
+		return nil
+	}
+}
+
+func (s *StreamState) indexForCallID(callID string) (int, bool) {
+	if callID == "" {
+		return 0, false
+	}
+	for idx, tc := range s.ToolCalls {
+		if tc != nil && tc.ID == callID {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
+func (s *StreamState) emitOrBackfillToolCall(tc openai.ToolCall, index int) []openai.ChatCompletionChunk {
+	payload := tc.CallPayload()
+	kind := "function"
+	if tc.IsCustom() {
+		kind = "custom"
+	}
+
+	if idx, ok := s.indexForCallID(tc.ID); ok {
+		index = idx
+	}
+	existing := s.ToolCalls[index]
+	if existing != nil && existing.Arguments.Len() > 0 {
+		// Already streamed the payload for this slot.
+		return nil
+	}
+
 	chunks := s.ensureRoleChunk()
+	if existing == nil {
+		existing = &toolCallState{
+			Index: index,
+			ID:    tc.ID,
+			Name:  tc.CallName(),
+			Kind:  kind,
+		}
+		s.ToolCalls[index] = existing
+	} else {
+		if existing.ID == "" {
+			existing.ID = tc.ID
+		}
+		if existing.Name == "" {
+			existing.Name = tc.CallName()
+		}
+		if existing.Kind == "" {
+			existing.Kind = kind
+		}
+	}
+
+	if !existing.Started {
+		existing.Started = true
+		chunks = append(chunks, s.toolCallStartChunk(existing))
+	}
+	if payload != "" && existing.Arguments.Len() == 0 {
+		existing.Arguments.WriteString(payload)
+		chunks = append(chunks, s.toolCallArgsChunk(existing, payload))
+	}
+	s.HasToolCalls = true
+	return chunks
+}
+
+func (s *StreamState) emitToolCallsFromComplete(toolCalls []openai.ToolCall) []openai.ChatCompletionChunk {
+	var chunks []openai.ChatCompletionChunk
 	for i, tc := range toolCalls {
-		kind := "function"
-		if tc.IsCustom() {
-			kind = "custom"
-		}
-		state := &toolCallState{
-			Index:   i,
-			ID:      tc.ID,
-			Name:    tc.CallName(),
-			Kind:    kind,
-			Started: true,
-		}
-		payload := tc.CallPayload()
-		state.Arguments.WriteString(payload)
-		s.ToolCalls[i] = state
-		chunks = append(chunks, s.toolCallStartChunk(state))
-		if payload != "" {
-			chunks = append(chunks, s.toolCallArgsChunk(state, payload))
-		}
+		chunks = append(chunks, s.emitOrBackfillToolCall(tc, i)...)
 	}
 	return chunks
 }
