@@ -11,6 +11,7 @@ type toolCallState struct {
 	Index     int
 	ID        string
 	Name      string
+	Kind      string // "function" or "custom"
 	Arguments strings.Builder
 	Started   bool
 }
@@ -109,6 +110,9 @@ func ApplyResponseEvent(state *StreamState, eventType string, data json.RawMessa
 	case eventType == "response.function_call_arguments.delta" || strings.Contains(eventType, "function_call_arguments.delta"):
 		return state.handleFunctionCallArgumentsDelta(data)
 
+	case eventType == "response.custom_tool_call_input.delta" || strings.Contains(eventType, "custom_tool_call_input.delta"):
+		return state.handleCustomToolCallInputDelta(data)
+
 	case eventType == "response.output_item.done":
 		return state.handleOutputItemDone(data)
 
@@ -143,7 +147,14 @@ func (s *StreamState) handleOutputItemAdded(data json.RawMessage) []openai.ChatC
 		}
 		return nil
 	}
-	if itemType != "function_call" {
+
+	var kind string
+	switch itemType {
+	case "function_call":
+		kind = "function"
+	case "custom_tool_call":
+		kind = "custom"
+	default:
 		return nil
 	}
 
@@ -155,7 +166,7 @@ func (s *StreamState) handleOutputItemAdded(data json.RawMessage) []openai.ChatC
 		callID = deterministicCallID(name, "", idx)
 	}
 
-	tc := &toolCallState{Index: idx, ID: callID, Name: name}
+	tc := &toolCallState{Index: idx, ID: callID, Name: name, Kind: kind}
 	s.ToolCalls[idx] = tc
 
 	chunks := s.ensureRoleChunk()
@@ -178,9 +189,41 @@ func (s *StreamState) handleFunctionCallArgumentsDelta(data json.RawMessage) []o
 	s.HasToolCalls = true
 	tc := s.ToolCalls[payload.OutputIndex]
 	if tc == nil {
-		tc = &toolCallState{Index: payload.OutputIndex, ID: deterministicCallID("", "", payload.OutputIndex)}
+		tc = &toolCallState{Index: payload.OutputIndex, ID: deterministicCallID("", "", payload.OutputIndex), Kind: "function"}
 		s.ToolCalls[payload.OutputIndex] = tc
 	}
+	if tc.Kind == "" {
+		tc.Kind = "function"
+	}
+	if payload.Delta == "" {
+		return nil
+	}
+	tc.Arguments.WriteString(payload.Delta)
+
+	chunks := s.ensureRoleChunk()
+	if !tc.Started {
+		tc.Started = true
+		chunks = append(chunks, s.toolCallStartChunk(tc))
+	}
+	chunks = append(chunks, s.toolCallArgsChunk(tc, payload.Delta))
+	return chunks
+}
+
+func (s *StreamState) handleCustomToolCallInputDelta(data json.RawMessage) []openai.ChatCompletionChunk {
+	var payload struct {
+		OutputIndex int    `json:"output_index"`
+		Delta       string `json:"delta"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil
+	}
+	s.HasToolCalls = true
+	tc := s.ToolCalls[payload.OutputIndex]
+	if tc == nil {
+		tc = &toolCallState{Index: payload.OutputIndex, ID: deterministicCallID("", "", payload.OutputIndex), Kind: "custom"}
+		s.ToolCalls[payload.OutputIndex] = tc
+	}
+	tc.Kind = "custom"
 	if payload.Delta == "" {
 		return nil
 	}
@@ -205,7 +248,7 @@ func (s *StreamState) handleOutputItemDone(data json.RawMessage) []openai.ChatCo
 	s.collectOutputItem(payload.Item)
 
 	itemType, _ := payload.Item["type"].(string)
-	if itemType != "function_call" {
+	if itemType != "function_call" && itemType != "custom_tool_call" {
 		return nil
 	}
 	s.HasToolCalls = true
@@ -289,50 +332,63 @@ func (s *StreamState) handleTerminal(data json.RawMessage) []openai.ChatCompleti
 func (s *StreamState) emitToolCallsFromComplete(toolCalls []openai.ToolCall) []openai.ChatCompletionChunk {
 	chunks := s.ensureRoleChunk()
 	for i, tc := range toolCalls {
+		kind := "function"
+		if tc.IsCustom() {
+			kind = "custom"
+		}
 		state := &toolCallState{
 			Index:   i,
 			ID:      tc.ID,
-			Name:    tc.Function.Name,
+			Name:    tc.CallName(),
+			Kind:    kind,
 			Started: true,
 		}
-		state.Arguments.WriteString(tc.Function.Arguments)
+		payload := tc.CallPayload()
+		state.Arguments.WriteString(payload)
 		s.ToolCalls[i] = state
 		chunks = append(chunks, s.toolCallStartChunk(state))
-		if tc.Function.Arguments != "" {
-			chunks = append(chunks, s.toolCallArgsChunk(state, tc.Function.Arguments))
+		if payload != "" {
+			chunks = append(chunks, s.toolCallArgsChunk(state, payload))
 		}
 	}
 	return chunks
 }
 
 func (s *StreamState) toolCallStartChunk(tc *toolCallState) openai.ChatCompletionChunk {
+	call := openai.ToolCall{
+		Index: tc.Index,
+		ID:    tc.ID,
+		Type:  tc.Kind,
+	}
+	if tc.Kind == "custom" {
+		call.Custom = &openai.ToolCallCustom{
+			Name:  tc.Name,
+			Input: "",
+		}
+	} else {
+		call.Type = "function"
+		call.Function = &openai.ToolCallFunction{
+			Name:      tc.Name,
+			Arguments: "",
+		}
+	}
 	return s.chunk(openai.ChatCompletionChoice{
 		Index: 0,
-		Delta: &openai.ChatMessage{
-			ToolCalls: []openai.ToolCall{{
-				Index: tc.Index,
-				ID:    tc.ID,
-				Type:  "function",
-				Function: openai.ToolCallFunction{
-					Name:      tc.Name,
-					Arguments: "",
-				},
-			}},
-		},
+		Delta: &openai.ChatMessage{ToolCalls: []openai.ToolCall{call}},
 	})
 }
 
 func (s *StreamState) toolCallArgsChunk(tc *toolCallState, delta string) openai.ChatCompletionChunk {
+	call := openai.ToolCall{Index: tc.Index}
+	if tc.Kind == "custom" {
+		call.Type = "custom"
+		call.Custom = &openai.ToolCallCustom{Input: delta}
+	} else {
+		call.Function = &openai.ToolCallFunction{Arguments: delta}
+	}
 	return s.chunk(openai.ChatCompletionChoice{
 		Index: 0,
-		Delta: &openai.ChatMessage{
-			ToolCalls: []openai.ToolCall{{
-				Index: tc.Index,
-				Function: openai.ToolCallFunction{
-					Arguments: delta,
-				},
-			}},
-		},
+		Delta: &openai.ChatMessage{ToolCalls: []openai.ToolCall{call}},
 	})
 }
 
@@ -345,6 +401,7 @@ type CollectedToolCall struct {
 	ID        string
 	Name      string
 	Arguments string
+	Kind      string // "function" or "custom"
 }
 
 func (s *StreamState) CollectedToolCalls() []CollectedToolCall {
@@ -363,10 +420,15 @@ func (s *StreamState) CollectedToolCalls() []CollectedToolCall {
 		if !ok || tc == nil {
 			continue
 		}
+		kind := tc.Kind
+		if kind == "" {
+			kind = "function"
+		}
 		out = append(out, CollectedToolCall{
 			ID:        tc.ID,
 			Name:      tc.Name,
 			Arguments: tc.Arguments.String(),
+			Kind:      kind,
 		})
 	}
 	return out

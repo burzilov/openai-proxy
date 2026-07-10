@@ -119,10 +119,22 @@ func inputItemToMessage(item map[string]any) *openai.ChatMessage {
 			ToolCalls: []openai.ToolCall{{
 				ID:   callID,
 				Type: "function",
-				Function: openai.ToolCallFunction{Name: name, Arguments: args},
+				Function: &openai.ToolCallFunction{Name: name, Arguments: args},
 			}},
 		}
-	case "function_call_output":
+	case "custom_tool_call":
+		callID, _ := item["call_id"].(string)
+		name, _ := item["name"].(string)
+		input, _ := item["input"].(string)
+		return &openai.ChatMessage{
+			Role: "assistant",
+			ToolCalls: []openai.ToolCall{{
+				ID:   callID,
+				Type: "custom",
+				Custom: &openai.ToolCallCustom{Name: name, Input: input},
+			}},
+		}
+	case "function_call_output", "custom_tool_call_output":
 		callID, _ := item["call_id"].(string)
 		output, _ := item["output"].(string)
 		return &openai.ChatMessage{Role: "tool", ToolCallID: callID, Content: mustRaw(output)}
@@ -149,11 +161,26 @@ func chatCompletionToResponses(chat *openai.ChatCompletionResponse) (*translate.
 		})
 	}
 	for _, tc := range msg.ToolCalls {
+		if tc.IsCustom() {
+			output = append(output, map[string]any{
+				"type":    "custom_tool_call",
+				"call_id": tc.ID,
+				"name":    tc.CallName(),
+				"input":   tc.CallPayload(),
+			})
+			continue
+		}
+		name := ""
+		args := ""
+		if tc.Function != nil {
+			name = tc.Function.Name
+			args = tc.Function.Arguments
+		}
 		output = append(output, map[string]any{
 			"type":      "function_call",
 			"call_id":   tc.ID,
-			"name":      tc.Function.Name,
-			"arguments": tc.Function.Arguments,
+			"name":      name,
+			"arguments": args,
 		})
 	}
 	status := "completed"

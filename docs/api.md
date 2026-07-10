@@ -44,7 +44,7 @@ Main endpoint. Accepts standard OpenAI Chat Completions requests.
 | `model` | Required |
 | `messages` | Required |
 | `stream` | Yes |
-| `tools` | Yes (non-stream and stream) |
+| `tools` | Yes — `function` and `custom` (e.g. Cursor `ApplyPatch`) |
 | `tool_choice` | Yes |
 | `max_tokens` | Mapped to `max_output_tokens` when supported |
 | `temperature` | Ignored on Codex backend |

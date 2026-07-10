@@ -69,7 +69,8 @@ func ToResponsesRequest(req openai.ChatCompletionRequest) (ResponsesRequest, err
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
 		out.MaxOutputTokens = req.MaxTokens
 	}
-	if tools := toolsToResponses(req.Tools); len(tools) > 0 {
+	tools, hasCustom := toolsToResponses(req.Tools)
+	if len(tools) > 0 {
 		out.Tools = tools
 		if len(req.ToolChoice) > 0 {
 			var toolChoice any
@@ -81,7 +82,8 @@ func ToResponsesRequest(req openai.ChatCompletionRequest) (ResponsesRequest, err
 		} else {
 			out.ToolChoice = "auto"
 		}
-		parallel := true
+		// Custom tools do not support parallel tool calling.
+		parallel := !hasCustom
 		out.ParallelToolCalls = &parallel
 	}
 	return out, nil
@@ -89,6 +91,8 @@ func ToResponsesRequest(req openai.ChatCompletionRequest) (ResponsesRequest, err
 
 func messagesToInput(messages []openai.ChatMessage) ([]map[string]any, error) {
 	items := make([]map[string]any, 0, len(messages))
+	customCallIDs := map[string]bool{}
+
 	for _, msg := range messages {
 		switch msg.Role {
 		case "user":
@@ -113,13 +117,31 @@ func messagesToInput(messages []openai.ChatMessage) ([]map[string]any, error) {
 			for _, tc := range msg.ToolCalls {
 				callID := strings.TrimSpace(tc.ID)
 				if callID == "" {
-					callID = deterministicCallID(tc.Function.Name, tc.Function.Arguments, len(items))
+					callID = deterministicCallID(tc.CallName(), tc.CallPayload(), len(items))
+				}
+				if tc.IsCustom() {
+					customCallIDs[callID] = true
+					name := tc.CallName()
+					input := tc.CallPayload()
+					items = append(items, map[string]any{
+						"type":    "custom_tool_call",
+						"call_id": callID,
+						"name":    name,
+						"input":   input,
+					})
+					continue
+				}
+				name := ""
+				args := ""
+				if tc.Function != nil {
+					name = tc.Function.Name
+					args = tc.Function.Arguments
 				}
 				items = append(items, map[string]any{
 					"type":      "function_call",
 					"call_id":   callID,
-					"name":      tc.Function.Name,
-					"arguments": normalizeArguments(tc.Function.Arguments),
+					"name":      name,
+					"arguments": normalizeArguments(args),
 				})
 			}
 		case "tool":
@@ -127,11 +149,20 @@ func messagesToInput(messages []openai.ChatMessage) ([]map[string]any, error) {
 			if callID == "" {
 				return nil, fmt.Errorf("tool message missing tool_call_id")
 			}
-			items = append(items, map[string]any{
-				"type":    "function_call_output",
-				"call_id": callID,
-				"output":  openai.MessageContentString(msg.Content),
-			})
+			output := openai.MessageContentString(msg.Content)
+			if customCallIDs[callID] {
+				items = append(items, map[string]any{
+					"type":    "custom_tool_call_output",
+					"call_id": callID,
+					"output":  output,
+				})
+			} else {
+				items = append(items, map[string]any{
+					"type":    "function_call_output",
+					"call_id": callID,
+					"output":  output,
+				})
+			}
 		default:
 			return nil, fmt.Errorf("unsupported message role: %s", msg.Role)
 		}
@@ -139,12 +170,21 @@ func messagesToInput(messages []openai.ChatMessage) ([]map[string]any, error) {
 	return items, nil
 }
 
-func toolsToResponses(tools []openai.Tool) []map[string]any {
+func toolsToResponses(tools []openai.Tool) (out []map[string]any, hasCustom bool) {
 	if len(tools) == 0 {
-		return nil
+		return nil, false
 	}
-	out := make([]map[string]any, 0, len(tools))
+	out = make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
+		if isCustomTool(tool) {
+			item, ok := customToolToResponses(tool)
+			if !ok {
+				continue
+			}
+			out = append(out, item)
+			hasCustom = true
+			continue
+		}
 		if tool.Type != "" && tool.Type != "function" {
 			continue
 		}
@@ -169,7 +209,75 @@ func toolsToResponses(tools []openai.Tool) []map[string]any {
 			"parameters":  paramsObj,
 		})
 	}
-	return out
+	return out, hasCustom
+}
+
+func isCustomTool(tool openai.Tool) bool {
+	return tool.Type == "custom" || tool.Custom != nil
+}
+
+func customToolToResponses(tool openai.Tool) (map[string]any, bool) {
+	name := strings.TrimSpace(tool.Name)
+	desc := tool.Description
+	formatRaw := tool.Format
+	if tool.Custom != nil {
+		if n := strings.TrimSpace(tool.Custom.Name); n != "" {
+			name = n
+		}
+		if tool.Custom.Description != "" {
+			desc = tool.Custom.Description
+		}
+		if len(tool.Custom.Format) > 0 {
+			formatRaw = tool.Custom.Format
+		}
+	}
+	if name == "" {
+		return nil, false
+	}
+	item := map[string]any{
+		"type": "custom",
+		"name": name,
+	}
+	if desc != "" {
+		item["description"] = desc
+	}
+	if format := normalizeCustomFormat(formatRaw); format != nil {
+		item["format"] = format
+	}
+	return item, true
+}
+
+// normalizeCustomFormat accepts both Responses-flat grammar
+// ({type,syntax,definition}) and Chat Completions nested grammar
+// ({type,grammar:{syntax,definition}}).
+func normalizeCustomFormat(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	typ, _ := obj["type"].(string)
+	if typ != "grammar" {
+		return obj
+	}
+	// Already Responses-flat: has syntax/definition at top level.
+	if _, ok := obj["syntax"]; ok {
+		return obj
+	}
+	// Nested Chat Completions: format.grammar.{syntax,definition}
+	if grammar, ok := obj["grammar"].(map[string]any); ok {
+		out := map[string]any{"type": "grammar"}
+		if syntax, ok := grammar["syntax"]; ok {
+			out["syntax"] = syntax
+		}
+		if definition, ok := grammar["definition"]; ok {
+			out["definition"] = definition
+		}
+		return out
+	}
+	return obj
 }
 
 func normalizeArguments(args string) string {

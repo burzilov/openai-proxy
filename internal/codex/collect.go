@@ -108,6 +108,15 @@ func synthesizeResponseFromStreamState(state *translate.StreamState) *translate.
 	}
 	if state.HasToolCalls {
 		for _, tc := range state.CollectedToolCalls() {
+			if tc.Kind == "custom" {
+				resp.Output = append(resp.Output, map[string]any{
+					"type":    "custom_tool_call",
+					"call_id": tc.ID,
+					"name":    tc.Name,
+					"input":   tc.Arguments,
+				})
+				continue
+			}
 			resp.Output = append(resp.Output, map[string]any{
 				"type":      "function_call",
 				"call_id":   tc.ID,
@@ -216,17 +225,45 @@ func drainOpenAIChatStream(body io.Reader) (*openai.ChatCompletionResponse, erro
 			idx := tc.Index
 			cur, ok := tools[idx]
 			if !ok {
-				cur = &openai.ToolCall{Index: idx, Type: "function"}
+				kind := tc.Type
+				if kind == "" {
+					if tc.IsCustom() {
+						kind = "custom"
+					} else {
+						kind = "function"
+					}
+				}
+				cur = &openai.ToolCall{Index: idx, Type: kind}
 				tools[idx] = cur
 			}
 			if tc.ID != "" {
 				cur.ID = tc.ID
 			}
-			if tc.Function.Name != "" {
-				cur.Function.Name = tc.Function.Name
+			if tc.Type != "" {
+				cur.Type = tc.Type
 			}
-			if tc.Function.Arguments != "" {
-				cur.Function.Arguments += tc.Function.Arguments
+			if tc.Custom != nil {
+				if cur.Custom == nil {
+					cur.Custom = &openai.ToolCallCustom{}
+				}
+				if tc.Custom.Name != "" {
+					cur.Custom.Name = tc.Custom.Name
+				}
+				if tc.Custom.Input != "" {
+					cur.Custom.Input += tc.Custom.Input
+				}
+				cur.Type = "custom"
+			}
+			if tc.Function != nil {
+				if cur.Function == nil {
+					cur.Function = &openai.ToolCallFunction{}
+				}
+				if tc.Function.Name != "" {
+					cur.Function.Name = tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					cur.Function.Arguments += tc.Function.Arguments
+				}
 			}
 		}
 	}

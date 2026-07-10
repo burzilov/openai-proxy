@@ -53,9 +53,17 @@ func MessageContentString(raw json.RawMessage) string {
 	return string(raw)
 }
 
+// Tool is a Chat Completions tool definition.
+// Supports classic function tools and custom tools (Cursor ApplyPatch, OpenAI CFG tools).
+// Custom tools may arrive in Responses-flat shape ({type,name,format}) or nested
+// Chat Completions shape ({type, custom:{name,format}}).
 type Tool struct {
-	Type     string       `json:"type"`
-	Function ToolFunction `json:"function"`
+	Type        string          `json:"type"`
+	Function    ToolFunction    `json:"function"`
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Format      json.RawMessage `json:"format,omitempty"`
+	Custom      *CustomToolDef  `json:"custom,omitempty"`
 }
 
 type ToolFunction struct {
@@ -64,16 +72,52 @@ type ToolFunction struct {
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
+type CustomToolDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Format      json.RawMessage `json:"format,omitempty"`
+}
+
 type ToolCall struct {
-	Index    int              `json:"index,omitempty"`
-	ID       string           `json:"id"`
-	Type     string           `json:"type"`
-	Function ToolCallFunction `json:"function"`
+	Index    int               `json:"index,omitempty"`
+	ID       string            `json:"id,omitempty"`
+	Type     string            `json:"type,omitempty"`
+	Function *ToolCallFunction `json:"function,omitempty"`
+	Custom   *ToolCallCustom   `json:"custom,omitempty"`
 }
 
 type ToolCallFunction struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+type ToolCallCustom struct {
+	Name  string `json:"name,omitempty"`
+	Input string `json:"input,omitempty"`
+}
+
+func (tc ToolCall) IsCustom() bool {
+	return tc.Type == "custom" || tc.Custom != nil
+}
+
+func (tc ToolCall) CallName() string {
+	if tc.Custom != nil && tc.Custom.Name != "" {
+		return tc.Custom.Name
+	}
+	if tc.Function != nil {
+		return tc.Function.Name
+	}
+	return ""
+}
+
+func (tc ToolCall) CallPayload() string {
+	if tc.Custom != nil {
+		return tc.Custom.Input
+	}
+	if tc.Function != nil {
+		return tc.Function.Arguments
+	}
+	return ""
 }
 
 type ChatCompletionResponse struct {

@@ -85,9 +85,24 @@ func extractOutput(resp *ResponsesResponse) (string, []openai.ToolCall, string) 
 			toolCalls = append(toolCalls, openai.ToolCall{
 				ID:   callID,
 				Type: "function",
-				Function: openai.ToolCallFunction{
+				Function: &openai.ToolCallFunction{
 					Name:      name,
 					Arguments: normalizeArguments(args),
+				},
+			})
+		case "custom_tool_call":
+			name, _ := item["name"].(string)
+			input, _ := item["input"].(string)
+			callID, _ := item["call_id"].(string)
+			if callID == "" {
+				callID = deterministicCallID(name, input, len(toolCalls))
+			}
+			toolCalls = append(toolCalls, openai.ToolCall{
+				ID:   callID,
+				Type: "custom",
+				Custom: &openai.ToolCallCustom{
+					Name:  name,
+					Input: input,
 				},
 			})
 		}
@@ -118,7 +133,7 @@ func hasReasoningOnly(resp *ResponsesResponse) bool {
 		switch typ {
 		case "reasoning":
 			hasReasoning = true
-		case "message", "function_call":
+		case "message", "function_call", "custom_tool_call":
 			hasContent = true
 		}
 	}
