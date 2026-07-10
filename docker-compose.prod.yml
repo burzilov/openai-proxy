@@ -25,7 +25,9 @@ services:
       - codex-net
 
   litellm:
-    image: docker.litellm.ai/berriai/litellm:main-stable
+    image: docker.litellm.ai/berriai/litellm:v1.91.1-stable
+    # >= v1.91.1 includes custom↔function Responses bridge (PRs #31571/#32258).
+    # Do not float on main-stable without checking ApplyPatch round-trip.
     ports:
       - "4000:4000"
     volumes:

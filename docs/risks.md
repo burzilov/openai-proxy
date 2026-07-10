@@ -16,7 +16,11 @@
 
 ### ChatGPT subscription vs API billing
 
-OAuth grants access to **subscription** quota (Plus/Pro/Team), not OpenAI Platform API credits. These are separate billing systems.
+OAuth grants access to **subscription** quota (Plus/Pro/Team), not OpenAI Platform API credits. These are separate billing systems. Cursor “BYOK” against this proxy is still ChatGPT OAuth — not a Platform API key.
+
+### Cursor Agent + LiteLLM
+
+Cursor may send Responses-style `custom` tools (e.g. `ApplyPatch`) to `/chat/completions`. Streaming custom tool deltas are not part of the Chat Completions spec; without dual-wire translation, aggregators often report `tool_calls: null`. See [api.md](./api.md) and [litellm.md](./litellm.md).
 
 ## Technical
 

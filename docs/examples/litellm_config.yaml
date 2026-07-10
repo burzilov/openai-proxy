@@ -32,5 +32,7 @@ general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 
 litellm_settings:
+  # drop_params strips unsupported top-level fields. Custom tools are carried
+  # inside tools[]; openai-proxy dual-wires them as type=function for LiteLLM.
   drop_params: true
   set_verbose: false

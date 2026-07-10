@@ -111,6 +111,25 @@ In Cursor settings:
 - **API key:** `LITELLM_MASTER_KEY`
 - **Model:** `codex-gpt-5.4` (or any name from `litellm_config.yaml`)
 
+### Cursor BYOK / Agent quirks
+
+Cursor Agent may send **Responses-style** `tools` (flat `type: "custom"`, Lark grammar for `ApplyPatch`) to **`/chat/completions`**. That hybrid is fragile:
+
+1. Official Chat Completions streaming only defines `type: "function"` tool deltas.
+2. LiteLLM (and many SDKs) aggregate streams and **drop** `type: "custom"`, producing `tool_calls: null` with `finish_reason: tool_calls`.
+3. openai-proxy dual-wires custom calls as `function` + `custom` so LiteLLM keeps the payload; Cursor can still read `custom` when present.
+4. Follow-ups that echo `ApplyPatch` as `type: "function"` without `tools[]` are still mapped back to Codex `custom_tool_call`.
+
+Prefer routing Cursor through LiteLLM → openai-proxy chat completions (dual-wire). For native Responses clients, call openai-proxy `POST /v1/responses` directly.
+
+OAuth ChatGPT login on the proxy is **not** an OpenAI Platform API key.
+
+## Image / version pin
+
+Compose pins LiteLLM to **`v1.91.1-stable`** (or newer) so the Responses custom↔function bridge (PRs [#31571](https://github.com/BerriAI/litellm/pull/31571) / [#32258](https://github.com/BerriAI/litellm/pull/32258)) is present. Avoid floating `main-stable` without re-checking ApplyPatch.
+
+`drop_params: true` in [examples/litellm_config.yaml](./examples/litellm_config.yaml) strips unsupported **top-level** fields; it does not remove `tools[]`. Custom tools rely on openai-proxy dual-wire on the chat path.
+
 ## Streaming through LiteLLM
 
 - Set `X-Accel-Buffering: no` on reverse proxies
@@ -126,6 +145,7 @@ In Cursor settings:
 | 401 `authentication_error` | No Codex auth | `docker compose run --rm openai-proxy auth login` |
 | 403 from upstream | Cloudflare | See [risks.md](./risks.md) |
 | Empty stream | Proxy buffering | Disable buffering |
+| `finish_reason: tool_calls` but `tool_calls: null` | Custom deltas dropped by aggregator | Use openai-proxy ≥ dual-wire; confirm LiteLLM ≥ v1.91.1 |
 
 ## Model list
 

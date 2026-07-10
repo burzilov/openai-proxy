@@ -15,6 +15,8 @@ The proxy does **not** forward this key to Codex — upstream uses the OAuth acc
 
 If `PROXY_API_KEY` is empty, client auth is disabled (local use only).
 
+OAuth ChatGPT credentials are **not** an OpenAI Platform BYOK API key.
+
 ## Endpoints
 
 ### `GET /healthz`
@@ -43,7 +45,7 @@ Main endpoint. Accepts standard OpenAI Chat Completions requests.
 |-------|---------|
 | `model` | Required |
 | `messages` | Required |
-| `stream` | Yes |
+| `stream` | Yes (includes agentic continuations) |
 | `tools` | Yes — `function` and `custom` (e.g. Cursor `ApplyPatch`) |
 | `tool_choice` | Yes |
 | `max_tokens` | Mapped to `max_output_tokens` when supported |
@@ -54,6 +56,23 @@ Main endpoint. Accepts standard OpenAI Chat Completions requests.
 **Non-stream response:** standard `chat.completion` object.  
 **Stream response:** `text/event-stream`, `data: {...}\n\n`, ends with `data: [DONE]\n\n`.
 
+#### Custom tools / dual-wire (Cursor ApplyPatch)
+
+Cursor Agent often sends Responses-style custom tools on `/chat/completions`:
+
+```json
+{"type":"custom","name":"ApplyPatch","format":{"type":"grammar","syntax":"lark","definition":"..."}}
+```
+
+OpenAI Chat Completions **streaming** only specifies `type: "function"` tool call deltas. Aggregators (LiteLLM, many SDKs) drop `type: "custom"` from the stream, which shows up as `finish_reason: tool_calls` with `tool_calls: null`.
+
+This proxy therefore emits custom tool calls in a **dual wire** format:
+
+- `type: "function"` + `function.name` / `function.arguments` (survives LiteLLM)
+- `custom.name` / `custom.input` (for clients that understand custom)
+
+On the way back, assistant `tool_calls` with `type: "function"` and name `ApplyPatch` are mapped to Codex `custom_tool_call` even if the follow-up omits `tools[]`.
+
 #### Multi-turn agents (Cursor)
 
 | Mechanism | Description |
@@ -62,14 +81,17 @@ Main endpoint. Accepts standard OpenAI Chat Completions requests.
 | `X-Session-Id` | Request header; proxy stores reasoning artifacts server-side |
 | `user` | Fallback session key |
 | Auto `conv:…` | If no header/`user`: hash of `model` + first user message |
-| Continuation | On `incomplete` / reasoning-only responses, the proxy continues the turn automatically |
+| Continuation | On `incomplete` / reasoning-only responses, the proxy continues the turn automatically (stream and non-stream) |
+
+### `POST /v1/responses`
+
+Thin authenticated passthrough to Codex Responses API (JSON or SSE). No Chat Completions translation — use this for native Responses clients. Same `PROXY_API_KEY` / OAuth as chat.
 
 ### Not supported
 
 - `/v1/embeddings`
 - `/v1/images/*`
 - `/v1/audio/*`
-- `/v1/responses` (use `/v1/chat/completions`)
 
 ## Examples
 
@@ -97,6 +119,10 @@ curl http://localhost:4000/v1/chat/completions \
     "messages": [{"role": "user", "content": "Hello"}]
   }'
 ```
+
+### ApplyPatch smoke (direct proxy)
+
+See [examples/e2e-applypatch-smoke.sh](./examples/e2e-applypatch-smoke.sh).
 
 ## Error codes
 
