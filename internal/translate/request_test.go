@@ -495,3 +495,64 @@ func TestStreamCompletedFallbackText(t *testing.T) {
 		t.Fatalf("text buffer=%q", state.TextBuffer)
 	}
 }
+
+func TestFlattenContentBlocks(t *testing.T) {
+	in := `[{"type":"text","text":"Вернул UI на **Partner**"}]`
+	got := translate.FlattenContentBlocks(in)
+	if got != "Вернул UI на **Partner**" {
+		t.Fatalf("got %q", got)
+	}
+	if translate.FlattenContentBlocks("plain") != "plain" {
+		t.Fatal("plain text should pass through")
+	}
+	if translate.FlattenContentBlocks(`[{"id":1}]`) != `[{"id":1}]` {
+		t.Fatal("non-text arrays should pass through")
+	}
+}
+
+func TestExtractOutput_StringifiedContentBlocks(t *testing.T) {
+	resp := &translate.ResponsesResponse{
+		Status: "completed",
+		Output: []map[string]any{
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": `[{"type":"text","text":"Hello Partner"}]`,
+			},
+		},
+	}
+	content, _, finish := translate.SummarizeOutput(resp)
+	if finish != "stop" || content != "Hello Partner" {
+		t.Fatalf("content=%q finish=%s", content, finish)
+	}
+}
+
+func TestStreamHoldsAndFlattensContentBlocks(t *testing.T) {
+	state := translate.NewStreamState("gpt-5.4")
+	payload := `[{"type":"text","text":"Switch Partner"}]`
+	var mid []openai.ChatCompletionChunk
+	for _, r := range payload {
+		ch := state.ChunksFromTextDelta(string(r))
+		mid = append(mid, ch...)
+	}
+	var sawText bool
+	for _, ch := range mid {
+		for _, c := range ch.Choices {
+			if c.Delta != nil && len(c.Delta.Content) > 0 && string(c.Delta.Content) != `""` {
+				// role chunk has no content; content should appear only after full JSON
+				if openai.MessageContentString(c.Delta.Content) == "Switch Partner" {
+					sawText = true
+				}
+				if strings.Contains(openai.MessageContentString(c.Delta.Content), `[{"type"`) {
+					t.Fatalf("streamed raw content blocks: %s", c.Delta.Content)
+				}
+			}
+		}
+	}
+	if !sawText {
+		t.Fatal("expected flattened text after complete JSON")
+	}
+	if state.TextBuffer != "Switch Partner" {
+		t.Fatalf("buffer=%q", state.TextBuffer)
+	}
+}

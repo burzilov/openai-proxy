@@ -24,6 +24,7 @@ func FromResponsesWithArtifacts(resp *ResponsesResponse, model string, artifacts
 	}
 
 	content, toolCalls, finishReason := extractOutput(resp)
+	content = FlattenContentBlocks(content)
 	id := resp.ID
 	if id == "" {
 		id = "resp_" + randomID()
@@ -110,7 +111,7 @@ func extractOutput(resp *ResponsesResponse) (string, []openai.ToolCall, string) 
 	} else if len(parts) == 0 && (resp.Status == "incomplete" || hasReasoningOnly(resp)) {
 		finish = "length"
 	}
-	return strings.Join(parts, "\n"), toolCalls, finish
+	return FlattenContentBlocks(strings.Join(parts, "\n")), toolCalls, finish
 }
 
 // wireCustomToolCall builds a Chat Completions tool_call that survives LiteLLM
@@ -155,12 +156,30 @@ func hasReasoningOnly(resp *ResponsesResponse) bool {
 }
 
 func messageText(item map[string]any) string {
-	content, ok := item["content"].([]any)
-	if !ok {
+	switch content := item["content"].(type) {
+	case string:
+		return FlattenContentBlocks(content)
+	case []any:
+		return textFromContentParts(content)
+	default:
+		// In-memory items may use []map[string]any before a JSON round-trip.
+		if raw, err := json.Marshal(item["content"]); err == nil {
+			var parts []any
+			if err := json.Unmarshal(raw, &parts); err == nil {
+				return textFromContentParts(parts)
+			}
+			var s string
+			if err := json.Unmarshal(raw, &s); err == nil {
+				return FlattenContentBlocks(s)
+			}
+		}
 		return ""
 	}
+}
+
+func textFromContentParts(parts []any) string {
 	var chunks []string
-	for _, part := range content {
+	for _, part := range parts {
 		m, ok := part.(map[string]any)
 		if !ok {
 			continue
@@ -174,6 +193,33 @@ func messageText(item map[string]any) string {
 		}
 	}
 	return strings.Join(chunks, "")
+}
+
+// FlattenContentBlocks unwraps a stringified Responses/Agents content array
+// ([{"type":"text","text":"..."}]) into plain text for Chat Completions clients.
+// Non-matching strings are returned unchanged.
+func FlattenContentBlocks(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" || trimmed[0] != '[' {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &blocks); err != nil || len(blocks) == 0 {
+		return s
+	}
+	var out strings.Builder
+	for _, b := range blocks {
+		switch b.Type {
+		case "text", "output_text":
+			out.WriteString(b.Text)
+		default:
+			return s
+		}
+	}
+	return out.String()
 }
 
 func formatResponseError(resp *ResponsesResponse) string {

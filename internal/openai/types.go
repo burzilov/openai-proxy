@@ -1,6 +1,9 @@
 package openai
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 type ChatCompletionRequest struct {
 	Model       string          `json:"model"`
@@ -48,9 +51,52 @@ func MessageContentString(raw json.RawMessage) string {
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		return flattenContentBlocksLocal(s)
+	}
+	// Content sometimes arrives as a Responses-style array.
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err == nil && len(parts) > 0 {
+		var b strings.Builder
+		ok := true
+		for _, p := range parts {
+			if p.Type != "text" && p.Type != "output_text" && p.Type != "" {
+				ok = false
+				break
+			}
+			b.WriteString(p.Text)
+		}
+		if ok {
+			return b.String()
+		}
 	}
 	return string(raw)
+}
+
+func flattenContentBlocksLocal(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" || trimmed[0] != '[' {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &blocks); err != nil || len(blocks) == 0 {
+		return s
+	}
+	var out strings.Builder
+	for _, b := range blocks {
+		switch b.Type {
+		case "text", "output_text":
+			out.WriteString(b.Text)
+		default:
+			return s
+		}
+	}
+	return out.String()
 }
 
 // Tool is a Chat Completions tool definition.

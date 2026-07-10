@@ -26,6 +26,7 @@ type StreamState struct {
 	RoleEmitted        bool
 	HasToolCalls       bool
 	ActiveMessagePhase string
+	holdContentBlocks  bool
 	nextToolIndex      int
 	ToolCalls          map[int]*toolCallState // keyed by Codex output_index
 	LastResponse       *ResponsesResponse
@@ -62,11 +63,72 @@ func (s *StreamState) ChunksFromTextDelta(delta string) []openai.ChatCompletionC
 	}
 	chunks := s.ensureRoleChunk()
 	s.TextBuffer += delta
+
+	if s.holdContentBlocks || looksLikeContentBlocksPrefix(s.TextBuffer) {
+		s.holdContentBlocks = true
+		if !jsonArrayComplete(s.TextBuffer) {
+			// Hold deltas until we can flatten or reject the content-blocks shape.
+			return chunks
+		}
+		s.holdContentBlocks = false
+		flat := FlattenContentBlocks(s.TextBuffer)
+		if flat != s.TextBuffer {
+			s.TextBuffer = flat
+			chunks = append(chunks, s.chunk(openai.ChatCompletionChoice{
+				Index: 0,
+				Delta: &openai.ChatMessage{Content: mustRawJSON(flat)},
+			}))
+			return chunks
+		}
+		// Not content-blocks after all — emit the buffered raw text once.
+		chunks = append(chunks, s.chunk(openai.ChatCompletionChoice{
+			Index: 0,
+			Delta: &openai.ChatMessage{Content: mustRawJSON(s.TextBuffer)},
+		}))
+		return chunks
+	}
+
 	chunks = append(chunks, s.chunk(openai.ChatCompletionChoice{
 		Index: 0,
 		Delta: &openai.ChatMessage{Content: mustRawJSON(delta)},
 	}))
 	return chunks
+}
+
+// FlattenBufferedContent rewrites TextBuffer when the full assistant message is a
+// stringified content-blocks array (Cursor sometimes surfaces that literally).
+func (s *StreamState) FlattenBufferedContent() {
+	if s.holdContentBlocks && jsonArrayComplete(s.TextBuffer) {
+		s.holdContentBlocks = false
+	}
+	flat := FlattenContentBlocks(s.TextBuffer)
+	if flat == s.TextBuffer {
+		return
+	}
+	s.TextBuffer = flat
+}
+
+func looksLikeContentBlocksPrefix(s string) bool {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return false
+	}
+	// Match [{"type":"text" or [{"type": "text" / output_text
+	if !strings.HasPrefix(t, "[") {
+		return false
+	}
+	compact := strings.ReplaceAll(strings.ReplaceAll(t, " ", ""), "\n", "")
+	return strings.HasPrefix(compact, `[{"type":"text"`) ||
+		strings.HasPrefix(compact, `[{"type":"output_text"`)
+}
+
+func jsonArrayComplete(s string) bool {
+	t := strings.TrimSpace(s)
+	if t == "" || t[0] != '[' {
+		return false
+	}
+	var raw json.RawMessage
+	return json.Unmarshal([]byte(t), &raw) == nil
 }
 
 func (s *StreamState) FinalChunk() openai.ChatCompletionChunk {
@@ -85,6 +147,7 @@ func (s *StreamState) PrepareContinuation() {
 	s.LastResponse = nil
 	s.FinishReason = "stop"
 	s.ActiveMessagePhase = ""
+	s.holdContentBlocks = false
 }
 
 func (s *StreamState) chunk(choice openai.ChatCompletionChoice) openai.ChatCompletionChunk {
@@ -346,17 +409,35 @@ func (s *StreamState) handleTerminal(data json.RawMessage) []openai.ChatCompleti
 	}
 	if err := json.Unmarshal(data, &payload); err == nil {
 		content, toolCalls, finish := extractOutput(&payload.Response)
+		content = FlattenContentBlocks(content)
 		s.LastResponse = &payload.Response
 		s.FinishReason = finish
 
 		var chunks []openai.ChatCompletionChunk
-		if s.TextBuffer == "" && !s.HasToolCalls && strings.TrimSpace(content) != "" {
+		if s.holdContentBlocks {
+			// Flush held content-blocks buffer as plain text.
+			s.holdContentBlocks = false
+			flat := FlattenContentBlocks(s.TextBuffer)
+			if flat == "" {
+				flat = content
+			}
+			s.TextBuffer = flat
+			if flat != "" {
+				chunks = append(chunks, s.ensureRoleChunk()...)
+				chunks = append(chunks, s.chunk(openai.ChatCompletionChoice{
+					Index: 0,
+					Delta: &openai.ChatMessage{Content: mustRawJSON(flat)},
+				}))
+			}
+		} else if s.TextBuffer == "" && !s.HasToolCalls && strings.TrimSpace(content) != "" {
 			chunks = append(chunks, s.ensureRoleChunk()...)
 			chunks = append(chunks, s.chunk(openai.ChatCompletionChoice{
 				Index: 0,
 				Delta: &openai.ChatMessage{Content: mustRawJSON(content)},
 			}))
 			s.TextBuffer = content
+		} else {
+			s.FlattenBufferedContent()
 		}
 		if len(toolCalls) > 0 {
 			for i, tc := range toolCalls {
