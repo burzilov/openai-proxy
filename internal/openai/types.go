@@ -111,11 +111,14 @@ func (tc ToolCall) CallName() string {
 }
 
 func (tc ToolCall) CallPayload() string {
-	if tc.Custom != nil {
+	if tc.Custom != nil && tc.Custom.Input != "" {
 		return tc.Custom.Input
 	}
-	if tc.Function != nil {
+	if tc.Function != nil && tc.Function.Arguments != "" {
 		return tc.Function.Arguments
+	}
+	if tc.Custom != nil {
+		return tc.Custom.Input
 	}
 	return ""
 }

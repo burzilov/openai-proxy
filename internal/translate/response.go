@@ -83,8 +83,9 @@ func extractOutput(resp *ResponsesResponse) (string, []openai.ToolCall, string) 
 				callID = deterministicCallID(name, args, len(toolCalls))
 			}
 			toolCalls = append(toolCalls, openai.ToolCall{
-				ID:   callID,
-				Type: "function",
+				Index: len(toolCalls),
+				ID:    callID,
+				Type:  "function",
 				Function: &openai.ToolCallFunction{
 					Name:      name,
 					Arguments: normalizeArguments(args),
@@ -97,14 +98,9 @@ func extractOutput(resp *ResponsesResponse) (string, []openai.ToolCall, string) 
 			if callID == "" {
 				callID = deterministicCallID(name, input, len(toolCalls))
 			}
-			toolCalls = append(toolCalls, openai.ToolCall{
-				ID:   callID,
-				Type: "custom",
-				Custom: &openai.ToolCallCustom{
-					Name:  name,
-					Input: input,
-				},
-			})
+			// Emit function wire format so LiteLLM/OpenAI streaming clients
+			// preserve the call; keep custom for capable clients (Cursor).
+			toolCalls = append(toolCalls, wireCustomToolCall(callID, name, input, len(toolCalls)))
 		}
 	}
 
@@ -115,6 +111,24 @@ func extractOutput(resp *ResponsesResponse) (string, []openai.ToolCall, string) 
 		finish = "length"
 	}
 	return strings.Join(parts, "\n"), toolCalls, finish
+}
+
+// wireCustomToolCall builds a Chat Completions tool_call that survives LiteLLM
+// (type=function) while still carrying custom.{name,input} for Cursor.
+func wireCustomToolCall(callID, name, input string, index int) openai.ToolCall {
+	return openai.ToolCall{
+		Index: index,
+		ID:    callID,
+		Type:  "function",
+		Function: &openai.ToolCallFunction{
+			Name:      name,
+			Arguments: input,
+		},
+		Custom: &openai.ToolCallCustom{
+			Name:  name,
+			Input: input,
+		},
+	}
 }
 
 // SummarizeOutput exposes extractOutput for agentic continuation logic.

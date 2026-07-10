@@ -141,6 +141,75 @@ func TestToResponsesRequest_CustomToolCallRoundtrip(t *testing.T) {
 	}
 }
 
+func TestToResponsesRequest_FunctionEchoedCustomTool(t *testing.T) {
+	// After we emit custom tools as type=function for LiteLLM, Cursor may echo
+	// them back as function tool_calls. Map by tool name to custom_tool_call.
+	req := openai.ChatCompletionRequest{
+		Model: "gpt-5.4",
+		Messages: []openai.ChatMessage{
+			{Role: "user", Content: []byte(`"patch"`)},
+			{
+				Role: "assistant",
+				ToolCalls: []openai.ToolCall{{
+					ID:   "call_patch",
+					Type: "function",
+					Function: &openai.ToolCallFunction{
+						Name:      "ApplyPatch",
+						Arguments: "*** Begin Patch\n*** End Patch\n",
+					},
+				}},
+			},
+			{Role: "tool", ToolCallID: "call_patch", Content: []byte(`"ok"`)},
+		},
+		Tools: []openai.Tool{{
+			Type: "custom",
+			Name: "ApplyPatch",
+			Format: json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: \"ok\""}`),
+		}},
+	}
+	out, err := translate.ToResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Input[1]["type"] != "custom_tool_call" {
+		t.Fatalf("expected custom_tool_call, got %v", out.Input[1]["type"])
+	}
+	if out.Input[2]["type"] != "custom_tool_call_output" {
+		t.Fatalf("expected custom_tool_call_output, got %v", out.Input[2]["type"])
+	}
+}
+
+func TestToResponsesRequest_ApplyPatchWithoutTools(t *testing.T) {
+	req := openai.ChatCompletionRequest{
+		Model: "gpt-5.4",
+		Messages: []openai.ChatMessage{
+			{Role: "user", Content: []byte(`"patch"`)},
+			{
+				Role: "assistant",
+				ToolCalls: []openai.ToolCall{{
+					ID:   "call_patch",
+					Type: "function",
+					Function: &openai.ToolCallFunction{
+						Name:      "ApplyPatch",
+						Arguments: "*** Begin Patch\n*** End Patch\n",
+					},
+				}},
+			},
+			{Role: "tool", ToolCallID: "call_patch", Content: []byte(`"ok"`)},
+		},
+	}
+	out, err := translate.ToResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Input[1]["type"] != "custom_tool_call" {
+		t.Fatalf("expected custom_tool_call without tools[], got %v", out.Input[1]["type"])
+	}
+	if out.Input[2]["type"] != "custom_tool_call_output" {
+		t.Fatalf("expected custom_tool_call_output, got %v", out.Input[2]["type"])
+	}
+}
+
 func TestToResponsesRequest_ToolChoicePassthrough(t *testing.T) {
 	req := openai.ChatCompletionRequest{
 		Model: "gpt-5.4",
@@ -199,8 +268,11 @@ func TestStreamCustomToolCallInputDelta(t *testing.T) {
 		t.Fatalf("expected role+tool start chunks, got %d", len(chunks))
 	}
 	start := chunks[len(chunks)-1].Choices[0].Delta.ToolCalls[0]
-	if start.Type != "custom" || start.Custom == nil || start.Custom.Name != "ApplyPatch" {
+	if start.Type != "function" || start.Function == nil || start.Function.Name != "ApplyPatch" {
 		t.Fatalf("start tool call=%+v", start)
+	}
+	if start.Custom == nil || start.Custom.Name != "ApplyPatch" {
+		t.Fatalf("expected dual custom fields, got %+v", start.Custom)
 	}
 
 	delta := json.RawMessage(`{"output_index":0,"delta":"*** Begin Patch\\n"}`)
@@ -209,7 +281,7 @@ func TestStreamCustomToolCallInputDelta(t *testing.T) {
 		t.Fatal("expected input delta chunk")
 	}
 	d := chunks[0].Choices[0].Delta.ToolCalls[0]
-	if d.Type != "custom" || d.Custom == nil || d.Custom.Input == "" {
+	if d.Function == nil || d.Function.Arguments == "" {
 		t.Fatalf("delta tool call=%+v", d)
 	}
 }
@@ -233,8 +305,60 @@ func TestExtractOutput_CustomToolCall(t *testing.T) {
 	if finish != "tool_calls" || len(toolCalls) != 1 {
 		t.Fatalf("finish=%s toolCalls=%d", finish, len(toolCalls))
 	}
-	if !toolCalls[0].IsCustom() || toolCalls[0].Custom.Name != "ApplyPatch" {
-		t.Fatalf("tool call=%+v", toolCalls[0])
+	tc := toolCalls[0]
+	if tc.Type != "function" || tc.Function == nil || tc.Function.Name != "ApplyPatch" {
+		t.Fatalf("expected function wire format, got %+v", tc)
+	}
+	if tc.Custom == nil || tc.Custom.Name != "ApplyPatch" || !strings.Contains(tc.Custom.Input, "Begin Patch") {
+		t.Fatalf("expected dual custom fields, got %+v", tc.Custom)
+	}
+}
+
+func TestStreamToolCallDenseIndexAfterReasoning(t *testing.T) {
+	state := translate.NewStreamState("gpt-5.4")
+
+	added := json.RawMessage(`{
+		"output_index": 2,
+		"item": {"type":"custom_tool_call","call_id":"call_patch","name":"ApplyPatch","input":""}
+	}`)
+	chunks := translate.ApplyResponseEvent(state, "response.output_item.added", added)
+	if len(chunks) < 2 {
+		t.Fatalf("expected role+tool start, got %d", len(chunks))
+	}
+	start := chunks[len(chunks)-1].Choices[0].Delta.ToolCalls[0]
+	if start.Index != 0 {
+		t.Fatalf("expected dense index 0, got %d", start.Index)
+	}
+
+	delta := json.RawMessage(`{"output_index":2,"delta":"*** Begin Patch\\n"}`)
+	chunks = translate.ApplyResponseEvent(state, "response.custom_tool_call_input.delta", delta)
+	if len(chunks) == 0 {
+		t.Fatal("expected args delta")
+	}
+	if chunks[0].Choices[0].Delta.ToolCalls[0].Index != 0 {
+		t.Fatalf("args delta index=%d, want 0", chunks[0].Choices[0].Delta.ToolCalls[0].Index)
+	}
+}
+
+func TestExtractOutput_FunctionCallDenseIndex(t *testing.T) {
+	resp := &translate.ResponsesResponse{
+		Status: "completed",
+		Output: []map[string]any{
+			{"type": "reasoning", "summary": []any{}},
+			{
+				"type":      "function_call",
+				"call_id":   "call_1",
+				"name":      "ping",
+				"arguments": `{}`,
+			},
+		},
+	}
+	_, toolCalls, finish := translate.SummarizeOutput(resp)
+	if finish != "tool_calls" || len(toolCalls) != 1 {
+		t.Fatalf("finish=%s n=%d", finish, len(toolCalls))
+	}
+	if toolCalls[0].Index != 0 {
+		t.Fatalf("index=%d, want 0", toolCalls[0].Index)
 	}
 }
 
@@ -257,24 +381,27 @@ func TestStreamCustomToolCallDoneWithoutDeltas(t *testing.T) {
 	if len(chunks) < 2 {
 		t.Fatalf("expected role+tool chunks from done, got %d", len(chunks))
 	}
-	var sawCustom bool
+	var sawApplyPatch bool
 	for _, ch := range chunks {
 		for _, c := range ch.Choices {
 			if c.Delta == nil {
 				continue
 			}
 			for _, tc := range c.Delta.ToolCalls {
-				if tc.Type == "custom" && tc.Custom != nil && tc.Custom.Name == "ApplyPatch" {
-					sawCustom = true
+				if tc.Function != nil && tc.Function.Name == "ApplyPatch" {
+					sawApplyPatch = true
+				}
+				if tc.Function != nil && strings.Contains(tc.Function.Arguments, "Begin Patch") {
+					sawApplyPatch = true
 				}
 				if tc.Custom != nil && strings.Contains(tc.Custom.Input, "Begin Patch") {
-					sawCustom = true
+					sawApplyPatch = true
 				}
 			}
 		}
 	}
-	if !sawCustom {
-		t.Fatal("expected custom ApplyPatch tool call chunks")
+	if !sawApplyPatch {
+		t.Fatal("expected ApplyPatch tool call chunks in function wire format")
 	}
 
 	completed := json.RawMessage(`{
@@ -331,11 +458,11 @@ func TestStreamCustomToolCallCompletedOnly(t *testing.T) {
 				continue
 			}
 			for _, tc := range c.Delta.ToolCalls {
-				if tc.Custom != nil && tc.Custom.Name != "" {
-					name = tc.Custom.Name
+				if tc.Function != nil && tc.Function.Name != "" {
+					name = tc.Function.Name
 				}
-				if tc.Custom != nil && tc.Custom.Input != "" {
-					input += tc.Custom.Input
+				if tc.Function != nil && tc.Function.Arguments != "" {
+					input += tc.Function.Arguments
 				}
 			}
 		}

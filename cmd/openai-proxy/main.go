@@ -61,7 +61,15 @@ func runServe() error {
 	store := auth.NewStore(cfg.AuthStorePath)
 	authMgr := auth.NewManager(cfg, store)
 	httpClient := &http.Client{Timeout: cfg.UpstreamTimeout}
-	codexClient := codex.NewClient(authMgr.BaseURL(), authMgr, httpClient)
+
+	streamTransport := http.DefaultTransport.(*http.Transport).Clone()
+	streamTransport.ResponseHeaderTimeout = cfg.UpstreamTimeout
+	streamClient := &http.Client{
+		Timeout:   0, // SSE body may exceed UpstreamTimeout
+		Transport: streamTransport,
+	}
+
+	codexClient := codex.NewClient(authMgr.BaseURL(), authMgr, httpClient, streamClient)
 	sessions := session.NewStore(cfg.SessionTTL)
 
 	handler := server.New(server.Dependencies{

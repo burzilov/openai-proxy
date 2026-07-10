@@ -15,21 +15,30 @@ import (
 )
 
 type Client struct {
-	baseURL string
-	auth    *auth.Manager
-	http    *http.Client
-	models  *ModelClient
+	baseURL    string
+	auth       *auth.Manager
+	http       *http.Client
+	streamHTTP *http.Client
+	models     *ModelClient
 }
 
-func NewClient(baseURL string, authMgr *auth.Manager, httpClient *http.Client) *Client {
+// NewClient builds a Codex API client.
+// httpClient is used for non-streaming calls (with a finite Timeout).
+// streamClient is used for SSE; pass Timeout:0 so long streams are not cut off.
+// If streamClient is nil, httpClient is reused for streams.
+func NewClient(baseURL string, authMgr *auth.Manager, httpClient, streamClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	if streamClient == nil {
+		streamClient = httpClient
+	}
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		auth:    authMgr,
-		http:    httpClient,
-		models:  NewModelClient(baseURL, authMgr, httpClient),
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		auth:       authMgr,
+		http:       httpClient,
+		streamHTTP: streamClient,
+		models:     NewModelClient(baseURL, authMgr, httpClient),
 	}
 }
 
@@ -99,7 +108,7 @@ func (c *Client) CreateResponseStream(ctx context.Context, req translate.Respons
 	}
 	httpReq.Header = UpstreamHeaders(token)
 
-	resp, err := c.http.Do(httpReq)
+	resp, err := c.streamHTTP.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +173,25 @@ func (c *Client) CreateResponseStream(ctx context.Context, req translate.Respons
 		}
 	}()
 	return ch, nil
+}
+
+// DoResponses posts a raw Responses API body to Codex.
+// Uses the streaming HTTP client when stream is true so long SSE bodies are not cut by Timeout.
+func (c *Client) DoResponses(ctx context.Context, body []byte, stream bool) (*http.Response, error) {
+	token, err := c.auth.AccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, JoinURL(c.baseURL, "/responses"), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header = UpstreamHeaders(token)
+	client := c.http
+	if stream {
+		client = c.streamHTTP
+	}
+	return client.Do(httpReq)
 }
 
 func MapAuthError(err error) *auth.AuthError {

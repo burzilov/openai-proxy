@@ -126,12 +126,20 @@ func inputItemToMessage(item map[string]any) *openai.ChatMessage {
 		callID, _ := item["call_id"].(string)
 		name, _ := item["name"].(string)
 		input, _ := item["input"].(string)
+		// Dual-wire: function for Chat Completions clients + custom for Cursor.
 		return &openai.ChatMessage{
 			Role: "assistant",
 			ToolCalls: []openai.ToolCall{{
 				ID:   callID,
-				Type: "custom",
-				Custom: &openai.ToolCallCustom{Name: name, Input: input},
+				Type: "function",
+				Function: &openai.ToolCallFunction{
+					Name:      name,
+					Arguments: input,
+				},
+				Custom: &openai.ToolCallCustom{
+					Name:  name,
+					Input: input,
+				},
 			}},
 		}
 	case "function_call_output", "custom_tool_call_output":

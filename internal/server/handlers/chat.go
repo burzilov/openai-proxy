@@ -75,12 +75,6 @@ func (h *ChatCompletions) complete(w http.ResponseWriter, r *http.Request, model
 }
 
 func (h *ChatCompletions) stream(w http.ResponseWriter, r *http.Request, model string, upstream translate.ResponsesRequest, sessionID string, turnIndex int) {
-	events, err := h.Client.CreateResponseStream(r.Context(), upstream)
-	if err != nil {
-		api.MapUpstreamError(w, err)
-		return
-	}
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		api.WriteError(w, http.StatusInternalServerError, "server_error", "streaming not supported", "internal_error")
@@ -92,12 +86,25 @@ func (h *ChatCompletions) stream(w http.ResponseWriter, r *http.Request, model s
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	maxCont := h.AgenticOptions.MaxContinuations
+	if maxCont <= 0 {
+		maxCont = 3
+	}
+
 	state := translate.NewStreamState(model)
-	for ev := range events {
-		if ev.Err != nil {
+	req := upstream
+	continuations := 0
+
+	for attempt := 0; attempt <= maxCont; attempt++ {
+		events, err := h.Client.CreateResponseStream(r.Context(), req)
+		if err != nil {
+			if attempt == 0 {
+				api.MapUpstreamError(w, err)
+				return
+			}
 			_ = writeSSE(w, openai.ErrorResponse{
 				Error: openai.ErrorDetail{
-					Message: ev.Err.Error(),
+					Message: err.Error(),
 					Type:    "server_error",
 					Code:    "stream_error",
 				},
@@ -105,18 +112,46 @@ func (h *ChatCompletions) stream(w http.ResponseWriter, r *http.Request, model s
 			flusher.Flush()
 			return
 		}
-		chunks := translate.ApplyResponseEvent(state, ev.Event, ev.Data)
-		for _, chunk := range chunks {
-			if err := writeSSE(w, chunk); err != nil {
+
+		for ev := range events {
+			if ev.Err != nil {
+				_ = writeSSE(w, openai.ErrorResponse{
+					Error: openai.ErrorDetail{
+						Message: ev.Err.Error(),
+						Type:    "server_error",
+						Code:    "stream_error",
+					},
+				})
+				flusher.Flush()
 				return
 			}
-			flusher.Flush()
+			chunks := translate.ApplyResponseEvent(state, ev.Event, ev.Data)
+			for _, chunk := range chunks {
+				if err := writeSSE(w, chunk); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
 		}
+
+		if state.FinishReason == "stop" && state.HasToolCalls {
+			state.FinishReason = "tool_calls"
+		}
+
+		resp := state.LastResponse
+		if resp == nil || !translate.ShouldContinueTurn(resp, state.FinishReason, attempt, maxCont) {
+			break
+		}
+		req.Input = translate.BuildContinuationInput(req.Input, resp)
+		state.PrepareContinuation()
+		continuations++
+		slog.Debug("codex stream continuation", "attempt", attempt+1, "session", sessionID)
 	}
 
-	if state.FinishReason == "stop" && state.HasToolCalls {
-		state.FinishReason = "tool_calls"
+	if continuations > 0 {
+		slog.Debug("agentic stream", "session", sessionID, "continuations", continuations)
 	}
+
 	final := state.FinalChunk()
 	_ = writeSSE(w, final)
 	flusher.Flush()

@@ -46,9 +46,11 @@ func New(dep Dependencies) http.Handler {
 				EnableChatFallback: dep.Config.EnableChatCompletionsFallback,
 			},
 		}
+		responses := &handlers.Responses{Client: dep.Codex}
 		r.Get("/v1/models", models.List)
 		r.Get("/v1/models/{modelID}", models.Get)
 		r.Post("/v1/chat/completions", chat.ServeHTTP)
+		r.Post("/v1/responses", responses.ServeHTTP)
 	})
 
 	return r

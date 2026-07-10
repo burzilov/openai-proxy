@@ -52,7 +52,7 @@ func ToResponsesRequest(req openai.ChatCompletionRequest) (ResponsesRequest, err
 		messages = messages[1:]
 	}
 
-	input, err := messagesToInput(messages)
+	input, err := messagesToInput(messages, customToolNames(req.Tools))
 	if err != nil {
 		return ResponsesRequest{}, err
 	}
@@ -89,7 +89,7 @@ func ToResponsesRequest(req openai.ChatCompletionRequest) (ResponsesRequest, err
 	return out, nil
 }
 
-func messagesToInput(messages []openai.ChatMessage) ([]map[string]any, error) {
+func messagesToInput(messages []openai.ChatMessage, customNames map[string]bool) ([]map[string]any, error) {
 	items := make([]map[string]any, 0, len(messages))
 	customCallIDs := map[string]bool{}
 
@@ -119,29 +119,24 @@ func messagesToInput(messages []openai.ChatMessage) ([]map[string]any, error) {
 				if callID == "" {
 					callID = deterministicCallID(tc.CallName(), tc.CallPayload(), len(items))
 				}
-				if tc.IsCustom() {
+				name := tc.CallName()
+				payload := tc.CallPayload()
+				// Cursor/LiteLLM may echo custom tools back as type=function.
+				if tc.IsCustom() || customNames[name] || isKnownCustomToolName(name) {
 					customCallIDs[callID] = true
-					name := tc.CallName()
-					input := tc.CallPayload()
 					items = append(items, map[string]any{
 						"type":    "custom_tool_call",
 						"call_id": callID,
 						"name":    name,
-						"input":   input,
+						"input":   payload,
 					})
 					continue
-				}
-				name := ""
-				args := ""
-				if tc.Function != nil {
-					name = tc.Function.Name
-					args = tc.Function.Arguments
 				}
 				items = append(items, map[string]any{
 					"type":      "function_call",
 					"call_id":   callID,
 					"name":      name,
-					"arguments": normalizeArguments(args),
+					"arguments": normalizeArguments(payload),
 				})
 			}
 		case "tool":
@@ -168,6 +163,41 @@ func messagesToInput(messages []openai.ChatMessage) ([]map[string]any, error) {
 		}
 	}
 	return items, nil
+}
+
+func customToolNames(tools []openai.Tool) map[string]bool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, tool := range tools {
+		if !isCustomTool(tool) {
+			continue
+		}
+		name := strings.TrimSpace(tool.Name)
+		if tool.Custom != nil {
+			if n := strings.TrimSpace(tool.Custom.Name); n != "" {
+				name = n
+			}
+		}
+		if name != "" {
+			out[name] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// knownCustomToolNames covers Cursor Agent tools that must round-trip as
+// custom_tool_call even when the follow-up request omits tools[].
+var knownCustomToolNames = map[string]bool{
+	"ApplyPatch": true,
+}
+
+func isKnownCustomToolName(name string) bool {
+	return knownCustomToolNames[strings.TrimSpace(name)]
 }
 
 func toolsToResponses(tools []openai.Tool) (out []map[string]any, hasCustom bool) {
