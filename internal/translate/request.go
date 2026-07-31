@@ -115,7 +115,7 @@ func messagesToInput(messages []openai.ChatMessage, customNames map[string]bool)
 				}
 			}
 			for _, tc := range msg.ToolCalls {
-				callID := strings.TrimSpace(tc.ID)
+				callID := normalizeCallID(tc.ID)
 				if callID == "" {
 					callID = deterministicCallID(tc.CallName(), tc.CallPayload(), len(items))
 				}
@@ -140,7 +140,7 @@ func messagesToInput(messages []openai.ChatMessage, customNames map[string]bool)
 				})
 			}
 		case "tool":
-			callID := strings.TrimSpace(msg.ToolCallID)
+			callID := normalizeCallID(msg.ToolCallID)
 			if callID == "" {
 				return nil, fmt.Errorf("tool message missing tool_call_id")
 			}
@@ -316,6 +316,22 @@ func normalizeArguments(args string) string {
 		return "{}"
 	}
 	return args
+}
+
+// maxCallIDLen is the Responses API limit for function_call / custom_tool_call call_id.
+const maxCallIDLen = 64
+
+// normalizeCallID keeps IDs within the Responses API 64-char limit.
+// Long IDs are replaced with a stable hash so call/output pairs still match.
+func normalizeCallID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	if len(id) <= maxCallIDLen {
+		return id
+	}
+	return "call_" + sha256Hex(id)[:40]
 }
 
 func deterministicCallID(name, args string, index int) string {

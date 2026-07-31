@@ -66,6 +66,165 @@ func TestToResponsesRequest_ToolCallRoundtripShape(t *testing.T) {
 	}
 }
 
+func TestToResponsesRequest_LongCallIDNormalized(t *testing.T) {
+	longID := "call_" + strings.Repeat("a", 80) // 85 chars, matches OpenAI 64-char limit failure
+	if len(longID) <= 64 {
+		t.Fatalf("fixture must exceed 64 chars, got %d", len(longID))
+	}
+	req := openai.ChatCompletionRequest{
+		Model: "gpt-5.4",
+		Messages: []openai.ChatMessage{
+			{Role: "user", Content: []byte(`"weather?"`)},
+			{
+				Role: "assistant",
+				ToolCalls: []openai.ToolCall{{
+					ID:   longID,
+					Type: "function",
+					Function: &openai.ToolCallFunction{
+						Name:      "get_weather",
+						Arguments: `{"city":"Moscow"}`,
+					},
+				}},
+			},
+			{Role: "tool", ToolCallID: longID, Content: []byte(`"15C"`)},
+		},
+	}
+	out, err := translate.ToResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callID, _ := out.Input[1]["call_id"].(string)
+	outID, _ := out.Input[2]["call_id"].(string)
+	if callID == "" || callID == longID {
+		t.Fatalf("expected normalized call_id, got %q", callID)
+	}
+	if len(callID) > 64 {
+		t.Fatalf("normalized call_id length %d exceeds 64", len(callID))
+	}
+	if callID != outID {
+		t.Fatalf("call/output call_id mismatch: %q vs %q", callID, outID)
+	}
+	if !strings.HasPrefix(callID, "call_") {
+		t.Fatalf("expected call_ prefix, got %q", callID)
+	}
+}
+
+func TestToResponsesRequest_LongCustomCallIDNormalized(t *testing.T) {
+	longID := "call_custom_" + strings.Repeat("b", 80)
+	req := openai.ChatCompletionRequest{
+		Model: "gpt-5.4",
+		Messages: []openai.ChatMessage{
+			{Role: "user", Content: []byte(`"patch"`)},
+			{
+				Role: "assistant",
+				ToolCalls: []openai.ToolCall{{
+					ID:   longID,
+					Type: "custom",
+					Custom: &openai.ToolCallCustom{
+						Name:  "ApplyPatch",
+						Input: "*** Begin Patch\n*** End Patch\n",
+					},
+				}},
+			},
+			{Role: "tool", ToolCallID: longID, Content: []byte(`"ok"`)},
+		},
+	}
+	out, err := translate.ToResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Input[1]["type"] != "custom_tool_call" {
+		t.Fatalf("second item type=%v", out.Input[1]["type"])
+	}
+	if out.Input[2]["type"] != "custom_tool_call_output" {
+		t.Fatalf("third item type=%v", out.Input[2]["type"])
+	}
+	callID, _ := out.Input[1]["call_id"].(string)
+	outID, _ := out.Input[2]["call_id"].(string)
+	if len(callID) > 64 {
+		t.Fatalf("normalized call_id length %d exceeds 64", len(callID))
+	}
+	if callID != outID {
+		t.Fatalf("call/output call_id mismatch: %q vs %q", callID, outID)
+	}
+	if callID == longID {
+		t.Fatal("expected long call_id to be rewritten")
+	}
+}
+
+func TestToResponsesRequest_ShortCallIDUnchanged(t *testing.T) {
+	req := openai.ChatCompletionRequest{
+		Model: "gpt-5.4",
+		Messages: []openai.ChatMessage{
+			{Role: "user", Content: []byte(`"weather?"`)},
+			{
+				Role: "assistant",
+				ToolCalls: []openai.ToolCall{{
+					ID:   "call_short_ok",
+					Type: "function",
+					Function: &openai.ToolCallFunction{
+						Name:      "get_weather",
+						Arguments: `{"city":"Moscow"}`,
+					},
+				}},
+			},
+			{Role: "tool", ToolCallID: "call_short_ok", Content: []byte(`"15C"`)},
+		},
+	}
+	out, err := translate.ToResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Input[1]["call_id"] != "call_short_ok" {
+		t.Fatalf("short call_id changed: %v", out.Input[1]["call_id"])
+	}
+	if out.Input[2]["call_id"] != "call_short_ok" {
+		t.Fatalf("short output call_id changed: %v", out.Input[2]["call_id"])
+	}
+}
+
+func TestToResponsesRequest_EmptyCallIDDeterministic(t *testing.T) {
+	req := openai.ChatCompletionRequest{
+		Model: "gpt-5.4",
+		Messages: []openai.ChatMessage{
+			{Role: "user", Content: []byte(`"weather?"`)},
+			{
+				Role: "assistant",
+				ToolCalls: []openai.ToolCall{{
+					ID:   "",
+					Type: "function",
+					Function: &openai.ToolCallFunction{
+						Name:      "get_weather",
+						Arguments: `{"city":"Moscow"}`,
+					},
+				}},
+			},
+		},
+	}
+	out, err := translate.ToResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callID, _ := out.Input[1]["call_id"].(string)
+	if callID == "" {
+		t.Fatal("expected deterministic call_id for empty input")
+	}
+	if len(callID) > 64 {
+		t.Fatalf("deterministic call_id length %d exceeds 64", len(callID))
+	}
+	if !strings.HasPrefix(callID, "call_") {
+		t.Fatalf("expected call_ prefix, got %q", callID)
+	}
+
+	out2, err := translate.ToResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out2.Input[1]["call_id"] != callID {
+		t.Fatalf("deterministic call_id not stable: %v vs %v", callID, out2.Input[1]["call_id"])
+	}
+}
+
 func TestToResponsesRequest_CustomToolPassthrough(t *testing.T) {
 	req := openai.ChatCompletionRequest{
 		Model: "gpt-5.4",
