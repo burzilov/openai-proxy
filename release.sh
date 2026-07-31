@@ -2,21 +2,34 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 vX.Y.Z" >&2
+  echo "Usage: $0" >&2
   exit 1
 }
 
-[[ $# -eq 1 ]] || usage
-
-release_tag="$1"
-if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Version must use the vX.Y.Z format, for example v0.1.7." >&2
-  exit 1
-fi
+[[ $# -eq 0 ]] || usage
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" ||
   { echo "The script must be run from a Git repository." >&2; exit 1; }
 cd "$repo_root"
+
+version_file="internal/version/version.go"
+version="$(
+  python3 - "$version_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source = path.read_text()
+match = re.search(r'const Version = "([0-9]+)\.([0-9]+)\.([0-9]+)"', source)
+if match is None:
+    raise SystemExit(f"Could not read a valid version from {path}.")
+
+major, minor, patch = map(int, match.groups())
+print(f"{major}.{minor}.{patch + 1}")
+PY
+)"
+release_tag="v$version"
 
 [[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]] ||
   { echo "The release must be created from the main branch." >&2; exit 1; }
@@ -36,9 +49,6 @@ if git ls-remote --exit-code --tags origin "refs/tags/$release_tag" >/dev/null 2
   echo "Tag $release_tag already exists on origin." >&2
   exit 1
 fi
-
-version="${release_tag#v}"
-version_file="internal/version/version.go"
 
 go test ./...
 
