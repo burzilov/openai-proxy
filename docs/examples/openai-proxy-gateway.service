@@ -1,0 +1,17 @@
+[Unit]
+Description=openai-proxy FreeLLMAPI normalize gateway
+After=network.target freellmapi.service
+Wants=freellmapi.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/openai-proxy
+Environment=GATEWAY_LISTEN=:3002
+Environment=GATEWAY_UPSTREAM=http://127.0.0.1:3001
+ExecStart=/opt/openai-proxy/openai-proxy gateway
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

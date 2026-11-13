@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"openai-proxy/internal/auth"
 	"openai-proxy/internal/codex"
 	"openai-proxy/internal/config"
+	"openai-proxy/internal/gateway"
 	"openai-proxy/internal/server"
 	"openai-proxy/internal/session"
 )
@@ -28,6 +30,11 @@ func main() {
 	case "serve":
 		if err := runServe(); err != nil {
 			slog.Error("serve failed", "error", err)
+			os.Exit(1)
+		}
+	case "gateway":
+		if err := runGateway(); err != nil {
+			slog.Error("gateway failed", "error", err)
 			os.Exit(1)
 		}
 	case "auth":
@@ -46,7 +53,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage:\n  %s serve\n  %s auth login|status|logout\n", os.Args[0], os.Args[0])
+	fmt.Fprintf(os.Stderr, "Usage:\n  %s serve\n  %s gateway\n  %s auth login|status|logout\n", os.Args[0], os.Args[0], os.Args[0])
 }
 
 func runServe() error {
@@ -91,6 +98,49 @@ func runServe() error {
 		slog.Info("listening", "addr", cfg.ListenAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return srv.Shutdown(ctx)
+}
+
+func runGateway() error {
+	cfg, err := config.LoadGateway()
+	if err != nil {
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
+	upstream, err := url.Parse(cfg.UpstreamURL)
+	if err != nil {
+		return fmt.Errorf("GATEWAY_UPSTREAM: %w", err)
+	}
+	if upstream.Scheme == "" || upstream.Host == "" {
+		return fmt.Errorf("GATEWAY_UPSTREAM must be absolute, got %q", cfg.UpstreamURL)
+	}
+
+	handler := gateway.NewHandler(upstream, slog.Default())
+	srv := &http.Server{
+		Addr:         cfg.ListenAddr,
+		Handler:      handler,
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		IdleTimeout:  cfg.IdleTimeout,
+	}
+
+	go func() {
+		slog.Info("gateway listening", "addr", cfg.ListenAddr, "upstream", cfg.UpstreamURL)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("gateway server error", "error", err)
 			os.Exit(1)
 		}
 	}()

@@ -93,7 +93,36 @@ Only secrets in `.env`:
 | `PROXY_API_KEY` | Key for proxy clients (LiteLLM, curl) |
 | `LITELLM_MASTER_KEY` | LiteLLM master key |
 
-All other settings are constants in `internal/config/config.go`.
+All other Codex-serve settings are constants in `internal/config/config.go`.
+
+## FreeLLMAPI gateway
+
+Cursor’s **Override OpenAI Base URL** may send `tools` with `type: "custom"` and `reasoning` as a string. FreeLLMAPI validates those fields strictly and returns HTTP 400 before any custom endpoint (including this proxy on `:8080`) runs.
+
+`openai-proxy gateway` is a separate listener that:
+
+1. Rewrites `reasoning: "medium"` → `reasoning: {"effort":"medium"}`
+2. Rewrites `type: "custom"` tools into `type: "function"` wrappers (by `name` / `custom.name`)
+3. Reverse-proxies all other traffic to FreeLLMAPI unchanged (including `/v1/models` and streams)
+
+Defaults:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GATEWAY_LISTEN` | `:3002` | Listen address on the FreeLLMAPI host |
+| `GATEWAY_UPSTREAM` | `http://127.0.0.1:3001` | FreeLLMAPI origin |
+
+Example (same host as FreeLLMAPI):
+
+```bash
+GATEWAY_LISTEN=:3002 GATEWAY_UPSTREAM=http://127.0.0.1:3001 openai-proxy gateway
+```
+
+Then point **Nginx Proxy Manager** at `http://<fla-host>:3002` instead of `:3001`. Keep Cursor Override URL as `https://llm.example/v1` — only the NPM upstream port changes.
+
+`gateway` does **not** use `PROXY_API_KEY` / Codex OAuth; FreeLLMAPI still authenticates with its own key. The Codex `serve` process on `:8080` stays as FreeLLMAPI’s custom endpoint.
+
+Systemd unit example: [examples/openai-proxy-gateway.service](./examples/openai-proxy-gateway.service).
 
 ## Network egress
 

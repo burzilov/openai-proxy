@@ -16,6 +16,14 @@ Typical setup: run `openai-proxy` and [LiteLLM](https://docs.litellm.ai/) in Doc
 Clients (Cursor, SDKs)  →  LiteLLM :4000  →  openai-proxy :8080  →  chatgpt.com/backend-api/codex
 ```
 
+Optional **FreeLLMAPI front** (Cursor Override OpenAI Base URL):
+
+```
+Cursor  →  NPM/TLS  →  openai-proxy gateway :3002  →  FreeLLMAPI :3001  →  (openai-proxy :8080 as custom endpoint, …)
+```
+
+The `gateway` command only rewrites Cursor-incompatible fields (`tools` `type:"custom"`, string `reasoning`) and reverse-proxies everything else. See [docs/deployment.md](docs/deployment.md#freellmapi-gateway).
+
 ## Quick start
 
 ```bash
@@ -56,7 +64,8 @@ image: burzilov/openai-proxy:latest
 openai-proxy auth login    # device code OAuth
 openai-proxy auth status   # token expiry, account, plan
 openai-proxy auth logout   # clear stored credentials
-openai-proxy serve         # HTTP server (default in Docker)
+openai-proxy serve         # Codex HTTP server (default in Docker)
+openai-proxy gateway       # FreeLLMAPI normalize reverse-proxy (default :3002 → :3001)
 ```
 
 ## Documentation
