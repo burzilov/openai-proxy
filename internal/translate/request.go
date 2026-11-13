@@ -96,7 +96,10 @@ func messagesToInput(messages []openai.ChatMessage, customNames map[string]bool)
 	for _, msg := range messages {
 		switch msg.Role {
 		case "user":
-			content := openai.MessageContentString(msg.Content)
+			content, err := userContentToResponses(msg.Content)
+			if err != nil {
+				return nil, err
+			}
 			items = append(items, map[string]any{
 				"role":    "user",
 				"content": content,
@@ -163,6 +166,59 @@ func messagesToInput(messages []openai.ChatMessage, customNames map[string]bool)
 		}
 	}
 	return items, nil
+}
+
+// userContentToResponses converts Chat Completions multimodal input to the
+// Responses format without silently treating image data as plain text.
+func userContentToResponses(raw json.RawMessage) (any, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text, nil
+	}
+	var parts []json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil || parts == nil {
+		return nil, fmt.Errorf("invalid user message content")
+	}
+	converted := make([]map[string]any, 0, len(parts))
+	for _, part := range parts {
+		var block struct {
+			Type     string          `json:"type"`
+			Text     string          `json:"text"`
+			ImageURL json.RawMessage `json:"image_url"`
+			Detail   string          `json:"detail"`
+		}
+		if err := json.Unmarshal(part, &block); err != nil {
+			return nil, fmt.Errorf("invalid user content part")
+		}
+		switch block.Type {
+		case "text", "input_text":
+			converted = append(converted, map[string]any{"type": "input_text", "text": block.Text})
+		case "image_url", "input_image":
+			var imageURL string
+			detail := block.Detail
+			if err := json.Unmarshal(block.ImageURL, &imageURL); err != nil {
+				var image struct {
+					URL    string `json:"url"`
+					Detail string `json:"detail"`
+				}
+				if err := json.Unmarshal(block.ImageURL, &image); err != nil {
+					return nil, fmt.Errorf("invalid image_url")
+				}
+				imageURL, detail = image.URL, image.Detail
+			}
+			if imageURL == "" {
+				return nil, fmt.Errorf("image_url is required")
+			}
+			image := map[string]any{"type": "input_image", "image_url": imageURL}
+			if detail != "" {
+				image["detail"] = detail
+			}
+			converted = append(converted, image)
+		default:
+			return nil, fmt.Errorf("unsupported user content type: %s", block.Type)
+		}
+	}
+	return converted, nil
 }
 
 func customToolNames(tools []openai.Tool) map[string]bool {

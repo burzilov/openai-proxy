@@ -321,8 +321,8 @@ func TestToResponsesRequest_FunctionEchoedCustomTool(t *testing.T) {
 			{Role: "tool", ToolCallID: "call_patch", Content: []byte(`"ok"`)},
 		},
 		Tools: []openai.Tool{{
-			Type: "custom",
-			Name: "ApplyPatch",
+			Type:   "custom",
+			Name:   "ApplyPatch",
 			Format: json.RawMessage(`{"type":"grammar","syntax":"lark","definition":"start: \"ok\""}`),
 		}},
 	}
@@ -674,8 +674,8 @@ func TestExtractOutput_StringifiedContentBlocks(t *testing.T) {
 		Status: "completed",
 		Output: []map[string]any{
 			{
-				"type": "message",
-				"role": "assistant",
+				"type":    "message",
+				"role":    "assistant",
 				"content": `[{"type":"text","text":"Hello Partner"}]`,
 			},
 		},
@@ -737,5 +737,35 @@ func TestStreamFlushPlainBracketProse(t *testing.T) {
 	}
 	if got != `[note] hello` {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestToResponsesRequest_UserImages(t *testing.T) {
+	req := openai.ChatCompletionRequest{Model: "gpt-5.4", Messages: []openai.ChatMessage{{Role: "user", Content: []byte(`[{"type":"text","text":"read this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,YWJj","detail":"high"}},{"type":"image_url","image_url":{"url":"https://example.org/a.png"}}]`)}}}
+	out, err := translate.ToResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, ok := out.Input[0]["content"].([]map[string]any)
+	if !ok || len(parts) != 3 {
+		t.Fatalf("content: %#v", out.Input[0]["content"])
+	}
+	if parts[0]["type"] != "input_text" || parts[0]["text"] != "read this" {
+		t.Fatalf("text: %#v", parts[0])
+	}
+	if parts[1]["type"] != "input_image" || parts[1]["image_url"] != "data:image/png;base64,YWJj" || parts[1]["detail"] != "high" {
+		t.Fatalf("image: %#v", parts[1])
+	}
+	if parts[2]["image_url"] != "https://example.org/a.png" {
+		t.Fatalf("url: %#v", parts[2])
+	}
+}
+
+func TestToResponsesRequest_RejectsInvalidImage(t *testing.T) {
+	for _, content := range []string{`[{"type":"image_url","image_url":{}}]`, `[{"type":"audio"}]`} {
+		req := openai.ChatCompletionRequest{Model: "gpt-5.4", Messages: []openai.ChatMessage{{Role: "user", Content: []byte(content)}}}
+		if _, err := translate.ToResponsesRequest(req); err == nil {
+			t.Fatalf("expected error for %s", content)
+		}
 	}
 }
