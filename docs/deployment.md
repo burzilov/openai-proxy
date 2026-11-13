@@ -112,13 +112,35 @@ Defaults:
 | `GATEWAY_LISTEN` | `:3002` | Listen address on the FreeLLMAPI host |
 | `GATEWAY_UPSTREAM` | `http://127.0.0.1:3001` | FreeLLMAPI origin |
 
-Example (same host as FreeLLMAPI):
+### Install without sources on the host
+
+The host does not need a Go toolchain or a git checkout. Build a static Linux binary elsewhere, copy it, enable systemd:
 
 ```bash
-GATEWAY_LISTEN=:3002 GATEWAY_UPSTREAM=http://127.0.0.1:3001 openai-proxy gateway
+# on a build machine (linux/amd64):
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags='-s -w' -o openai-proxy ./cmd/openai-proxy
+
+# copy to the FreeLLMAPI host:
+scp openai-proxy root@llm:/usr/local/bin/openai-proxy
+ssh root@llm 'chmod +x /usr/local/bin/openai-proxy'
+
+# on the FreeLLMAPI host — autostart:
+curl -fsSL -o /etc/systemd/system/openai-proxy-gateway.service \
+  https://raw.githubusercontent.com/burzilov/openai-proxy/main/docs/examples/openai-proxy-gateway.service
+systemctl daemon-reload
+systemctl enable --now openai-proxy-gateway.service
+systemctl status openai-proxy-gateway.service --no-pager
+```
+
+Or run once without systemd:
+
+```bash
+GATEWAY_LISTEN=:3002 GATEWAY_UPSTREAM=http://127.0.0.1:3001 /usr/local/bin/openai-proxy gateway
 ```
 
 Then point **Nginx Proxy Manager** at `http://<fla-host>:3002` instead of `:3001`. Keep Cursor Override URL as `https://llm.example/v1` — only the NPM upstream port changes.
+
+If you already run `openai-proxy serve` on `:8080`, replace that same binary with a build that includes `gateway`, then add the second unit above (both commands share one binary).
 
 `gateway` does **not** use `PROXY_API_KEY` / Codex OAuth; FreeLLMAPI still authenticates with its own key. The Codex `serve` process on `:8080` stays as FreeLLMAPI’s custom endpoint.
 

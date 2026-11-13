@@ -1,15 +1,14 @@
 [Unit]
 Description=openai-proxy FreeLLMAPI normalize gateway
-After=network.target freellmapi.service
-Wants=freellmapi.service
+After=network-online.target freellmapi.service
+Wants=network-online.target freellmapi.service
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/opt/openai-proxy
+# Binary only — no source tree required on the host.
+ExecStart=/usr/local/bin/openai-proxy gateway
 Environment=GATEWAY_LISTEN=:3002
 Environment=GATEWAY_UPSTREAM=http://127.0.0.1:3001
-ExecStart=/opt/openai-proxy/openai-proxy gateway
 Restart=on-failure
 RestartSec=2
 
